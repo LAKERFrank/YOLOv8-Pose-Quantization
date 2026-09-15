@@ -12,6 +12,7 @@ ROI-assisted auto-labeling version:
 """
 
 import argparse
+import hashlib
 import random
 import shutil
 from dataclasses import dataclass
@@ -274,7 +275,7 @@ def write_yolo_pose_label(
 def write_dataset_yaml(train_dir: Path) -> None:
     yaml_path = train_dir / "data.yaml"
     content = (
-        "path: .\n"
+        f"path: '{train_dir.resolve().as_posix().replace(chr(39), chr(39) * 2)}'\n"
         "train: images\n"
         "val: images\n"
         "channels: 1\n"
@@ -366,18 +367,13 @@ def _draw_preview_vis(img_gray_path: Path, label_path: Path, out_vis_path: Path,
 
 def discover_jobs(root: Path) -> List[VideoJob]:
     jobs: List[VideoJob] = []
-    for p in sorted(root.iterdir()):
-        if not p.is_dir():
+    video_extensions = {".mp4", ".avi", ".mov", ".mkv", ".m4v", ".wmv", ".webm", ".mpg", ".mpeg"}
+    for v in sorted(root.rglob("*")):
+        if not v.is_file() or v.suffix.lower() not in video_extensions:
             continue
-
-        # mp4s = sorted(p.glob("CameraReader_*_rotated.mp4"))
-        mp4s = sorted(p.glob("CameraReader_*.mp4"))
-        for v in mp4s:
-            stem = v.stem
-            # suffix = stem.replace("CameraReader_", "").replace("_rotated", "")
-            suffix = stem.replace("CameraReader_", "")
-            cr_name = f"CR{suffix}"
-            jobs.append(VideoJob(session_dir=p, video_path=v, video_name=cr_name))
+        stem = v.stem
+        cr_name = f"CR{stem[len('CameraReader_'):]}" if stem.startswith("CameraReader_") else stem
+        jobs.append(VideoJob(session_dir=v.parent, video_path=v, video_name=cr_name))
     return jobs
 
 
@@ -444,7 +440,7 @@ def filter_dets_by_missing_kpts(
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--root", required=True, help="sportxai root folder")
+    ap.add_argument("--root", default="dataset", help="dataset root containing raw-data/; outputs go to labeled-dataset/")
     ap.add_argument("--weights", default="yolov8x-pose-p6.pt", help="pose weights")
     ap.add_argument("--device", default="", help="e.g. 0 / cpu")
     ap.add_argument("--target_fps", type=float, default=120.0)
@@ -468,7 +464,14 @@ def main():
     if not root.exists():
         raise FileNotFoundError(root)
 
-    out_train = root / "dataset" / "office-calib"
+    raw_root = root / "raw-data"
+    if not raw_root.is_dir():
+        raise FileNotFoundError(raw_root)
+    jobs = discover_jobs(raw_root)
+    if not jobs:
+        raise RuntimeError(f"No supported videos found in {raw_root}")
+
+    out_train = root / "labeled-dataset"
     out_images = out_train / "images"
     out_labels = out_train / "labels"
     out_preview = out_train / "preview"
@@ -485,7 +488,6 @@ def main():
     from ultralytics import YOLO
     model = YOLO(args.weights)
 
-    jobs = discover_jobs(root / "raw-data/office-calib")
     print(f"[INFO] root          = {root}")
     print(f"[INFO] out_train     = {out_train}")
     print(f"[INFO] jobs(videos)  = {len(jobs)}")
@@ -607,7 +609,8 @@ def main():
             ]
 
             session = job.session_dir.name
-            base = f"{session}_{job.video_name}_f{frame_idx:06d}"
+            video_id = hashlib.sha256(job.video_path.relative_to(raw_root).as_posix().encode("utf-8")).hexdigest()[:16]
+            base = f"{session}_{job.video_name}_{video_id}_f{frame_idx:06d}"
             img_path = out_images / f"{base}.png"
             lab_path = out_labels / f"{base}.txt"
 
