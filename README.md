@@ -248,3 +248,122 @@ quantized-weights/
 `CALIB_FRAC` 只影響 INT8 calibration 使用的圖片數量，不會改變原始 dataset。程式會以 `SEED` 固定隨機抽樣結果。若更換 `MODEL_PT`、`DATA_YAML` 或 calibration 設定，請先刪除輸出目錄內既有的 `calib.cache` 與 `calib_batch10.cache`，避免 TensorRT 重複使用舊的 calibration cache。
 
 目前腳本預設只建立 INT8 engine；FP16 與 FP32 的建置開關在 Python 程式中預設關閉。
+
+## 5. Measurement
+
+量測相關程式放在 `measurement/`，分為兩種用途：
+
+- `val_engine.py`：在指定 dataset 上驗證 TensorRT engine，輸出 box／pose mAP、FPS 與各階段平均耗時。
+- `inferenceSpeed.sh`：使用 TensorRT 的 `trtexec` 進行效能壓測，觀察 engine 本身的 latency、throughput 與資料傳輸影響。
+
+### 使用 `val_engine.py` 驗證模型
+
+進入 measurement 目錄：
+
+```sh
+cd measurement
+```
+
+執行指令：
+
+```sh
+env -u PYTHONPATH /tmp/ultra_export_venv/bin/python val_engine.py \
+  --models \
+  /workspaces/CameraSensor/LayerSensing/Pose/weights/int8.engine \
+  --datasets \
+  /workspaces/CameraSensor/Quantization/pose-dataset/datasets/coco-pose/coco-pose.yaml \
+  /workspaces/CameraSensor/Quantization/pose-dataset/datasets/groundtruth-upright/data.yaml \
+  --imgsz 640 \
+  --device 0 \
+  --conf 0.25 \
+  --iou 0.7 \
+  --outdir ./val_engine_results
+```
+
+`env -u PYTHONPATH` 會先移除目前的 `PYTHONPATH`，再使用 `/tmp/ultra_export_venv/` 中的 Python 環境執行，避免其他 Python 套件路徑影響驗證環境。
+
+主要參數：
+
+| 參數 | 說明 |
+| --- | --- |
+| `--models` | 一個或多個要驗證的 TensorRT `.engine`。 |
+| `--datasets` | 一個或多個 dataset YAML。程式使用各 dataset 的 validation split。 |
+| `--imgsz` | 輸入影像尺寸。需與建立 engine 時使用的尺寸一致。 |
+| `--device` | 使用的 CUDA GPU 編號。 |
+| `--conf` | 預測結果的 confidence threshold。 |
+| `--iou` | NMS 使用的 IoU threshold。 |
+| `--outdir` | 驗證結果的輸出目錄。 |
+
+程式會對每一個 model 與每一個 dataset 組合進行驗證。以上指令包含一個 engine 和兩個 datasets，因此結果中會有兩筆紀錄，分別代表 COCO Pose 與 ground truth upright dataset 的量測結果。
+
+常用結果欄位：
+
+| 欄位 | 意義 |
+| --- | --- |
+| `box_map`、`box_map50`、`box_map75` | Bounding box 的 COCO mAP、mAP@0.50 與 mAP@0.75。 |
+| `pose_map`、`pose_map50`、`pose_map75` | 人體關鍵點的 COCO OKS mAP、mAP@0.50 與 mAP@0.75。 |
+| `fps` | 只依 `infer_time_s` 計算的每秒處理影像數，不包含前處理與後處理。 |
+| `speed_preprocess_ms` | 每張影像讀取、letterbox、色彩／灰階轉換與 normalization 的平均時間。 |
+| `speed_inference_ms` | 每張影像執行 TensorRT wrapper 的平均時間。此程式的計時包含 buffer 配置、Host-to-Device 傳輸、engine 執行、Device-to-Host 傳輸與 CUDA stream 同步。 |
+| `speed_postprocess_ms` | 每張影像進行輸出解碼、confidence 過濾、NMS、座標還原與整理評估資料的平均時間。 |
+| `speed_loss_ms` | 此驗證程式不計算 loss，因此結果為空值。 |
+
+這些速度是整個 validation dataset 的平均值。第一次執行可能受到 CUDA context 初始化、GPU 溫度、時脈或同機其他程序影響；比較不同 engine 時應使用相同硬體、dataset、batch size 與參數。
+
+#### `val_engine.py` 結果輸出位置
+
+由於指令先進入 `measurement/`，且指定 `--outdir ./val_engine_results`，結果會輸出到：
+
+```text
+measurement/val_engine_results/
+├── results.csv
+├── results.json
+└── results.md
+```
+
+- `results.csv`：方便使用試算表整理或比較多組實驗。
+- `results.json`：保留結構化的完整結果，方便其他程式讀取。
+- `results.md`：方便直接閱讀的 Markdown 表格。
+
+若加上 `--save-preds-json`，每個 model／dataset 組合還會在相同目錄產生一份 `<engine>__<dataset>.preds.json`，內容包含 bounding box 與 keypoint predictions。
+
+### 使用 `inferenceSpeed.sh` 量測 TensorRT 效能
+
+先修改 `inferenceSpeed.sh` 中 `--loadEngine` 後方的路徑，使其指向要量測的 engine，然後執行：
+
+```sh
+cd measurement
+bash inferenceSpeed.sh
+```
+
+此腳本透過 `/usr/bin/trtexec` 重複執行 engine，主要選項的意義如下：
+
+| 選項 | 說明 |
+| --- | --- |
+| `--warmUp=1000` | 先預熱 1000 ms，降低 CUDA 初始化與剛開始執行造成的偏差。 |
+| `--duration=30` | 正式量測至少持續 30 秒。 |
+| `--iterations=2000` | 設定量測 iteration 數量。 |
+| `--useSpinWait` | 等待 GPU 時使用 spin-wait，通常能降低 latency 波動，但會提高 CPU 使用率。 |
+| `--noDataTransfers` | 不量測輸入與輸出的 Host／Device 資料傳輸，用來觀察較接近 engine 純 GPU 執行的效能。 |
+
+`trtexec` log 中通常應關注：
+
+- `Throughput`：每秒完成多少次 inference。固定 batch 大於 1 時，每秒影像數約為 throughput 乘以 batch size。
+- `GPU Compute Time`：GPU 執行 engine 的時間。
+- `Host Latency`：主機端觀察到的 latency；包含 enqueue 及啟用資料傳輸時的 H2D／D2H 時間。
+- latency percentile：例如 median、90%、95% 或 99%，用來觀察一般延遲及較慢情況，不能只看平均值。
+
+`inferenceSpeed.sh` 前三行命令帶有 `--noDataTransfers`，用於觀察 engine 計算效能；後三行則包含資料傳輸，更接近包含 TensorRT I/O 的執行情境。這兩種量測都不包含影像讀檔、resize、normalization、NMS 或 keypoint 後處理，因此不能直接視為應用程式完整的端到端速度。端到端各階段耗時應參考 `val_engine.py` 的結果。
+
+#### `inferenceSpeed.sh` 結果輸出位置
+
+從 `measurement/` 執行時，腳本會將 `trtexec` 的標準輸出與錯誤輸出寫入：
+
+```text
+measurement/
+├── batch1.log
+├── batch3.log
+└── batch10.log
+```
+
+目前腳本的兩輪測試使用相同 log 檔名，因此後一輪「包含資料傳輸」的結果會覆蓋前一輪 `--noDataTransfers` 的結果。若兩組結果都需要保留，請將兩輪輸出改成不同檔名，例如 `batch1_no_transfer.log` 與 `batch1_with_transfer.log`。`batch3.log` 只有在對應的 `int8_batch3.engine` 存在時才能產生；本 repo 的 `run_all_quantization.sh` 目前只建立 batch 1 與 batch 10 engine。
