@@ -44,7 +44,7 @@ python -m pip install ultralytics torch opencv-python numpy
 
 ### 有 ROI 版本
 
-在原始影像的 `(0, 200)` 到 `(640, 640)` 區域內偵測，目標每秒取樣 0.5 張（約每 2 秒一張）：
+在原始影像的 `(0, 200)` 到 `(640, 640)` 區域內偵測：
 
 ```sh
 nohup python3 dataset_generator.py \
@@ -61,7 +61,7 @@ nohup python3 dataset_generator.py \
 
 ### 沒有 ROI 版本
 
-使用完整影像進行偵測，目標每秒取樣 30 張：
+使用完整影像進行偵測：
 
 ```sh
 nohup python3 dataset_generator.py \
@@ -100,7 +100,7 @@ ROI 座標需依實際影片調整。也可用 `--roi_cr0` 至 `--roi_cr3` 分�
 
 以下保留完整的 training 指令設定，使用 Linux / Bash 的單一反斜線換行。
 
-**目前版本相容性：** `train.py` 尚未提供 `--lr0`、`--lrf`、`--degrees`、`--translate`、`--scale`、`--shear`、`--perspective`、`--flipud`、`--fliplr`、`--mosaic` 參數，以下完整指令目前會出現 `unrecognized arguments`，需待程式支援後才能直接使用。本次僅記錄指令，不修改訓練程式；若先移除這些參數執行，學習率與資料增強將使用程式及套件的設定，不等同於以下完整設定。
+**目前版本相容性：** `train.py` 尚未提供 `--lr0`、`--lrf`、`--degrees`、`--translate`、`--scale`、`--shear`、`--perspective`、`--flipud`、`--fliplr`、`--mosaic` 參數。
 
 ```sh
 nohup python3 train.py \
@@ -124,8 +124,6 @@ nohup python3 train.py \
   --fliplr 0.5 \
   --mosaic 0.0 &
 ```
-
-`--data data.yaml` 指向目前工作目錄中的設定檔。若直接使用產生器的輸出，請改成 `--data dataset/labeled-dataset/data.yaml`。
 
 上述 `--project trains --name office` 指定的輸出目錄為 `trains/office/`；成功訓練後，模型權重位於：
 
@@ -158,7 +156,7 @@ nohup python3 finetune.py \
   --mosaic 0.0 &
 ```
 
-目前 `finetune.py` 支援上述所有參數。`data.yaml` 與 `best.pt` 為目前工作目錄下的檔案；若沿用前述流程，請分別改成 `dataset/labeled-dataset/data.yaml` 與 `trains/office/weights/best.pt`。
+目前 `finetune.py` 支援上述所有參數。
 
 上述指令透過 `--project finetune --name office-finetune` 將結果輸出到 `finetune/office-finetune/`，模型權重位於：
 
@@ -167,8 +165,6 @@ finetune/office-finetune/weights/best.pt
 finetune/office-finetune/weights/last.pt
 ```
 
-兩支程式保留原始設定：未指定 `--project` 與 `--name` 時，`train.py` 的輸出位置為 `runs/train/`，`finetune.py` 則為 `finetune/counterclockwise-invert-100/`。若指定的輸出目錄已存在，Ultralytics 可能自動加上數字尾碼；微調時請指定實際產生的權重路徑。
-
 查看完整參數：
 
 ```sh
@@ -176,3 +172,79 @@ python dataset_generator.py --help
 python train.py --help
 python finetune.py --help
 ```
+
+## 4. Quantization
+
+量化相關程式放在 `quantization_process/`。一般情況下只需設定 `run_all_quantization.sh` 開頭的參數，再執行一次腳本；它會依序產生固定 batch size 為 1 與 10 的 ONNX 模型及 TensorRT INT8 engine。
+
+先進入量化程式目錄：
+
+```sh
+cd quantization_process
+```
+
+修改 `run_all_quantization.sh` 中的設定：
+
+```sh
+export MODEL_PT="/path/to/best.pt"
+export DATA_YAML="/path/to/data.yaml"
+export CALIB_FRAC=1
+```
+
+主要參數：
+
+| 參數 | 說明 |
+| --- | --- |
+| `MODEL_PT` | 要進行量化的 YOLO Pose `.pt` 權重。模型需為本專案使用的單通道灰階模型。 |
+| `DATA_YAML` | INT8 calibration 使用的資料集設定檔。程式會讀取 YAML 中的 `train` 路徑並搜尋圖片。 |
+| `CALIB_FRAC` | 從 training dataset 隨機抽取多少比例進行 calibration。`1` 代表全部、`0.5` 代表 50%、`0.1` 代表 10%。batch 10 至少會取 10 張圖片。 |
+
+其他設定：
+
+| 參數 | 說明 | 腳本設定值 |
+| --- | --- | --- |
+| `IMGSZ` | 模型輸入影像尺寸 | `640` |
+| `DEVICE` | 使用的 CUDA GPU 編號 | `0` |
+| `WS` | TensorRT 建置 engine 可使用的 workspace 大小，單位為 GiB | `8` |
+| `SEED` | 抽取 calibration 圖片時使用的隨機種子 | `0` |
+
+執行量化：
+
+```sh
+bash run_all_quantization.sh
+```
+
+若要在背景執行並保存 log：
+
+```sh
+nohup bash run_all_quantization.sh > quantization.log 2>&1 &
+```
+
+腳本會依序執行以下流程：
+
+1. 匯出固定 batch 1 的 `pose.onnx`。
+2. 使用 calibration dataset 建立 batch 1 的 `int8.engine`。
+3. 匯出固定 batch 10 的 `pose_batch10.onnx`。
+4. 使用 calibration dataset 建立 batch 10 的 `int8_batch10.engine`。
+
+輸出目錄由 Python 程式的 `OUT_DIR` 環境變數決定。若未設定，會使用程式內建路徑；建議在 `run_all_quantization.sh` 的設定區加入自己的輸出位置，例如：
+
+```sh
+export OUT_DIR="/path/to/quantized-weights"
+```
+
+完整的主要輸出如下：
+
+```text
+quantized-weights/
+├── pose.onnx
+├── int8.engine
+├── calib.cache
+├── pose_batch10.onnx
+├── int8_batch10.engine
+└── calib_batch10.cache
+```
+
+`CALIB_FRAC` 只影響 INT8 calibration 使用的圖片數量，不會改變原始 dataset。程式會以 `SEED` 固定隨機抽樣結果。若更換 `MODEL_PT`、`DATA_YAML` 或 calibration 設定，請先刪除輸出目錄內既有的 `calib.cache` 與 `calib_batch10.cache`，避免 TensorRT 重複使用舊的 calibration cache。
+
+目前腳本預設只建立 INT8 engine；FP16 與 FP32 的建置開關在 Python 程式中預設關閉。
