@@ -258,12 +258,6 @@ quantized-weights/
 
 ### 使用 `val_engine.py` 驗證模型
 
-進入 measurement 目錄：
-
-```sh
-cd measurement
-```
-
 執行指令：
 
 ```sh
@@ -331,8 +325,8 @@ measurement/val_engine_results/
 
 先修改 `inferenceSpeed.sh` 中 `--loadEngine` 後方的路徑，使其指向要量測的 engine，然後執行：
 
+執行指令：
 ```sh
-cd measurement
 bash inferenceSpeed.sh
 ```
 
@@ -353,7 +347,7 @@ bash inferenceSpeed.sh
 - `Host Latency`：主機端觀察到的 latency；包含 enqueue 及啟用資料傳輸時的 H2D／D2H 時間。
 - latency percentile：例如 median、90%、95% 或 99%，用來觀察一般延遲及較慢情況，不能只看平均值。
 
-`inferenceSpeed.sh` 前三行命令帶有 `--noDataTransfers`，用於觀察 engine 計算效能；後三行則包含資料傳輸，更接近包含 TensorRT I/O 的執行情境。這兩種量測都不包含影像讀檔、resize、normalization、NMS 或 keypoint 後處理，因此不能直接視為應用程式完整的端到端速度。端到端各階段耗時應參考 `val_engine.py` 的結果。
+`inferenceSpeed.sh` 前二行命令帶有 `--noDataTransfers`，用於觀察 engine 計算效能；後二行則包含資料傳輸，更接近包含 TensorRT I/O 的執行情境。這兩種量測都不包含影像讀檔、resize、normalization、NMS 或 keypoint 後處理，因此不能直接視為應用程式完整的端到端速度。端到端各階段耗時應參考 `val_engine.py` 的結果。
 
 #### `inferenceSpeed.sh` 結果輸出位置
 
@@ -362,8 +356,5 @@ bash inferenceSpeed.sh
 ```text
 measurement/
 ├── batch1.log
-├── batch3.log
 └── batch10.log
 ```
-
-目前腳本的兩輪測試使用相同 log 檔名，因此後一輪「包含資料傳輸」的結果會覆蓋前一輪 `--noDataTransfers` 的結果。若兩組結果都需要保留，請將兩輪輸出改成不同檔名，例如 `batch1_no_transfer.log` 與 `batch1_with_transfer.log`。`batch3.log` 只有在對應的 `int8_batch3.engine` 存在時才能產生；本 repo 的 `run_all_quantization.sh` 目前只建立 batch 1 與 batch 10 engine。

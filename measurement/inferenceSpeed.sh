@@ -1,7 +1,5 @@
-/usr/bin/trtexec --loadEngine=/workspaces/CameraSensor/LayerSensing/Pose/weights/upright300+llr/int8.engine  --useSpinWait --warmUp=1000 --duration=30 --iterations=2000 --noDataTransfers > batch1.log 2>&1
-/usr/bin/trtexec --loadEngine=/workspaces/CameraSensor/LayerSensing/Pose/weights/upright300+llr/int8_batch3.engine  --useSpinWait --warmUp=1000 --duration=30 --iterations=2000 --noDataTransfers > batch3.log 2>&1
-/usr/bin/trtexec --loadEngine=/workspaces/CameraSensor/LayerSensing/Pose/weights/upright300+llr/int8_batch10.engine --useSpinWait --warmUp=1000 --duration=30 --iterations=2000 --noDataTransfers > batch10.log 2>&1
+# /usr/bin/trtexec --loadEngine=/workspaces/CameraSensor/LayerSensing/Pose/weights/upright300+llr/int8.engine  --useSpinWait --warmUp=1000 --duration=30 --iterations=2000 --noDataTransfers > batch1.log 2>&1
+# /usr/bin/trtexec --loadEngine=/workspaces/CameraSensor/LayerSensing/Pose/weights/upright300+llr/int8_batch10.engine --useSpinWait --warmUp=1000 --duration=30 --iterations=2000 --noDataTransfers > batch10.log 2>&1
 
 /usr/bin/trtexec --loadEngine=/workspaces/CameraSensor/LayerSensing/Pose/weights/upright300+llr/int8.engine  --useSpinWait --warmUp=1000 --duration=30 --iterations=2000 > batch1.log 2>&1
-/usr/bin/trtexec --loadEngine=/workspaces/CameraSensor/LayerSensing/Pose/weights/upright300+llr/int8_batch3.engine  --useSpinWait --warmUp=1000 --duration=30 --iterations=2000 > batch3.log 2>&1
 /usr/bin/trtexec --loadEngine=/workspaces/CameraSensor/LayerSensing/Pose/weights/upright300+llr/int8_batch10.engine --useSpinWait --warmUp=1000 --duration=30 --iterations=2000 > batch10.log 2>&1
