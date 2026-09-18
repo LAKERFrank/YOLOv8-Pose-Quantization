@@ -1,42 +1,80 @@
 # YOLOv8-Pose-Quantization
 
-YOLOv8 Pose 專案，目前說明從影片自動產生姿態標記資料，再進行單通道灰階模型訓練（training）與微調（fine-tuning）的流程。量化等其他功能將後續補充。
+YOLOv8 Pose 專案，包含影片自動標記、單通道灰階模型訓練（training）、微調（fine-tuning）、TensorRT 量化與效能量測流程。
 
 ## 目錄結構
 
-原本的 `sportxai/` 改為 `dataset/`，其中存放標記資料的 `dataset/` 子目錄改為 `labeled-dataset/`。
 
 ```text
 YOLOv8-Pose-Quantization/
-├── dataset_generator.py
-├── train.py
-├── finetune.py
 ├── dataset/
+│   ├── dataset_generator.py      # 從影片產生 YOLO Pose 標記資料
 │   ├── raw-data/                 # 原始影片，可放在多層子目錄
-│   └── labeled-dataset/          # 自動產生
+│   └── labeled-dataset/          # 自動產生的標記資料
 │       ├── images/              # 640 × 640 灰階 PNG
 │       ├── labels/              # YOLO Pose 格式 TXT
 │       ├── preview/             # 抽樣影像、標記與骨架預覽
 │       └── data.yaml            # 訓練資料設定
-├── trains/
-│   └── office/                  # 下方 training 指令指定的輸出位置
-└── finetune/
-    └── office-finetune/         # 下方 fine-tuning 指令指定的輸出位置
+├── model/
+│   ├── train.py                 # 訓練單通道灰階 Pose 模型
+│   └── finetune.py              # 使用既有權重繼續微調
+├── quantization_process/
+│   ├── run_all_quantization.sh  # 一次執行 batch 1 與 batch 10 量化
+│   ├── build_pose_onnx.py
+│   ├── build_pose_engine.py
+│   ├── build_pose_onnx_batch10.py
+│   └── build_pose_engine_batch10.py
+├── measurement/
+│   ├── val_engine.py            # 驗證準確度與各階段執行速度
+│   └── inferenceSpeed.sh        # 使用 trtexec 量測 engine 效能
+├── requirements.txt             # Python 套件需求
+├── LICENSE
+└── README.md
 ```
 
 ## 環境準備
 
-請在 repo 根目錄執行以下 terminal 指令；使用前需安裝 Python，並準備可執行這些腳本的 Ultralytics、PyTorch、OpenCV 與 NumPy 環境。
+### 主要執行環境
+
+請先準備支援 CUDA 12 的 Python 環境，再於 repo 根目錄安裝套件：
 
 ```sh
-python -m pip install ultralytics torch opencv-python numpy
+python3 -m pip install -U pip
+python3 -m pip install -r requirements.txt
 ```
 
-以下範例的 `--device 0` 使用第一張 GPU，需要支援 CUDA 的 PyTorch 環境；若使用 CPU，改成 `--device cpu`。本 repo 尚未固定套件版本。
+`requirements.txt` 包含資料產生、訓練、量化與量測所需套件，其中 TensorRT 與 PyCUDA 固定使用：
 
-## 1. 從影片產生標記資料
+```text
+pycuda==2025.1.3
+tensorrt-cu12==10.16.0.72
+```
 
-將影片放入 `dataset/raw-data/`。`dataset_generator.py` 會遞迴搜尋所有子目錄，讀取支援副檔名的影片，透過預訓練 Pose 模型自動標記，再輸出到 `dataset/labeled-dataset/`。
+ONNX 相關套件也可單獨安裝：
+
+```sh
+pip install onnx onnxsim
+```
+
+以下範例的 `--device 0` 使用第一張 GPU，需要 CUDA 12、相容的 NVIDIA Driver，以及支援 CUDA 的 PyTorch 環境。若執行不需要 TensorRT 的流程，也可將 `--device` 改為 `cpu`。
+
+### ONNX 匯出專用 venv
+
+`quantization_process/run_all_quantization.sh` 會使用 `/tmp/ultra_export_venv/bin/python` 執行 ONNX 匯出程式。請先建立專用 venv，並安裝指定版本的 Ultralytics：
+
+```sh
+python3 -m venv /tmp/ultra_export_venv
+source /tmp/ultra_export_venv/bin/activate
+python -m pip install -U pip
+pip install ultralytics==8.0.135
+deactivate
+```
+
+完成後不需要在每次量化前手動啟用 venv；`run_all_quantization.sh` 會直接呼叫其中的 Python。由於環境放在 `/tmp/`，主機重新啟動或容器重建後可能需要再次建立。
+
+## 1. Dataset Generation
+
+將影片放入 `dataset/raw-data/`。`dataset/dataset_generator.py` 會遞迴搜尋所有子目錄，讀取支援副檔名的影片，透過預訓練 Pose 模型自動標記，再輸出到 `dataset/labeled-dataset/`。
 
 支援搜尋的副檔名：`.mp4`、`.avi`、`.mov`、`.mkv`、`.m4v`、`.wmv`、`.webm`、`.mpg`、`.mpeg`；實際解碼能力取決於 OpenCV 環境。
 
@@ -44,13 +82,13 @@ python -m pip install ultralytics torch opencv-python numpy
 
 ### 有 ROI 版本
 
-在原始影像的 `(0, 200)` 到 `(640, 640)` 區域內偵測：
+在原始影像的 `(0, 200)` 到 `(640, 640)` 區域內偵測(可以針對需求自行調整)：
 
 ```sh
-nohup python3 dataset_generator.py \
+nohup python3 dataset/dataset_generator.py \
   --root dataset \
   --weights yolo26x-pose.pt \
-  --target_fps 0.5 \
+  --target_fps 30 \
   --imgsz 640 \
   --conf 0.25 \
   --iou 0.6 \
@@ -64,7 +102,7 @@ nohup python3 dataset_generator.py \
 使用完整影像進行偵測：
 
 ```sh
-nohup python3 dataset_generator.py \
+nohup python3 dataset/dataset_generator.py \
   --root dataset \
   --weights yolo26x-pose.pt \
   --target_fps 30 \
@@ -81,7 +119,7 @@ nohup python3 dataset_generator.py \
 | --- | --- | --- |
 | `--root` | 包含 `raw-data/` 的資料根目錄 | `dataset` |
 | `--weights` | 自動標記使用的 Pose 權重 | `yolov8x-pose-p6.pt` |
-| `--target_fps` | 每秒目標取樣影格數 | `120` |
+| `--target_fps` | 每秒目標取樣影格數 | `30` |
 | `--conf` | 人物偵測信心門檻 | `0.25` |
 | `--kpt_thr` | 關鍵點信心門檻 | `0.15` |
 | `--preview_n` | 抽樣預覽數量 | `10` |
@@ -96,14 +134,14 @@ ROI 座標需依實際影片調整。也可用 `--roi_cr0` 至 `--roi_cr3` 分�
 
 ## 2. Training
 
-`train.py` 讀取 `labeled-dataset/data.yaml`，預設從 `yolov8n-pose.pt` 預訓練權重開始訓練。程式將第一層卷積改為單通道，並停用 HSV 色彩增強。
+`model/train.py` 讀取 `labeled-dataset/data.yaml`，預設從 `yolov8n-pose.pt` 預訓練權重開始訓練。程式將第一層卷積改為單通道，並停用 HSV 色彩增強。
 
 以下保留完整的 training 指令設定，使用 Linux / Bash 的單一反斜線換行。
 
-**目前版本相容性：** `train.py` 尚未提供 `--lr0`、`--lrf`、`--degrees`、`--translate`、`--scale`、`--shear`、`--perspective`、`--flipud`、`--fliplr`、`--mosaic` 參數。
+**目前版本相容性：** `model/train.py` 尚未提供 `--lr0`、`--lrf`、`--degrees`、`--translate`、`--scale`、`--shear`、`--perspective`、`--flipud`、`--fliplr`、`--mosaic` 參數。
 
 ```sh
-nohup python3 train.py \
+nohup python3 model/train.py \
   --data data.yaml \
   --model yolov8n-pose.pt \
   --epochs 300 \
@@ -112,7 +150,7 @@ nohup python3 train.py \
   --device 0 \
   --workers 12 \
   --project trains \
-  --name office \
+  --name train \
   --lr0 0.001 \
   --lrf 0.01 \
   --degrees 2.0 \
@@ -125,19 +163,19 @@ nohup python3 train.py \
   --mosaic 0.0 &
 ```
 
-上述 `--project trains --name office` 指定的輸出目錄為 `trains/office/`；成功訓練後，模型權重位於：
+上述 `--project trains --name train` 指定的輸出目錄為 `trains/train/`；成功訓練後，模型權重位於：
 
 ```text
-trains/office/weights/best.pt
-trains/office/weights/last.pt
+trains/train/weights/best.pt
+trains/train/weights/last.pt
 ```
 
 ## 3. Fine-tuning
 
-`finetune.py` 使用既有模型權重與 `labeled-dataset/data.yaml` 繼續微調，支援單通道模型，並使用較保守的姿態資料增強設定。
+`model/finetune.py` 使用既有模型權重與 `labeled-dataset/data.yaml` 繼續微調，支援單通道模型，並使用較保守的姿態資料增強設定。
 
 ```sh
-nohup python3 finetune.py \
+nohup python3 model/finetune.py \
   --data data.yaml \
   --weights best.pt \
   --epochs 80 \
@@ -145,8 +183,8 @@ nohup python3 finetune.py \
   --batch 32 \
   --device 0 \
   --workers 12 \
-  --project finetune \
-  --name office-finetune \
+  --project finetunes \
+  --name finetune \
   --lr0 0.00007 \
   --lrf 0.01 \
   --degrees 2 \
@@ -156,32 +194,26 @@ nohup python3 finetune.py \
   --mosaic 0.0 &
 ```
 
-目前 `finetune.py` 支援上述所有參數。
+目前 `model/finetune.py` 支援上述所有參數。
 
-上述指令透過 `--project finetune --name office-finetune` 將結果輸出到 `finetune/office-finetune/`，模型權重位於：
+上述指令透過 `--project finetunes --name finetune` 將結果輸出到 `finetunes/finetune/`，模型權重位於：
 
 ```text
-finetune/office-finetune/weights/best.pt
-finetune/office-finetune/weights/last.pt
+finetunes/finetune/weights/best.pt
+finetunes/finetune/weights/last.pt
 ```
 
 查看完整參數：
 
 ```sh
-python dataset_generator.py --help
-python train.py --help
-python finetune.py --help
+python dataset/dataset_generator.py --help
+python model/train.py --help
+python model/finetune.py --help
 ```
 
 ## 4. Quantization
 
 量化相關程式放在 `quantization_process/`。一般情況下只需設定 `run_all_quantization.sh` 開頭的參數，再執行一次腳本；它會依序產生固定 batch size 為 1 與 10 的 ONNX 模型及 TensorRT INT8 engine。
-
-先進入量化程式目錄：
-
-```sh
-cd quantization_process
-```
 
 修改 `run_all_quantization.sh` 中的設定：
 
@@ -226,12 +258,6 @@ nohup bash run_all_quantization.sh > quantization.log 2>&1 &
 2. 使用 calibration dataset 建立 batch 1 的 `int8.engine`。
 3. 匯出固定 batch 10 的 `pose_batch10.onnx`。
 4. 使用 calibration dataset 建立 batch 10 的 `int8_batch10.engine`。
-
-輸出目錄由 Python 程式的 `OUT_DIR` 環境變數決定。若未設定，會使用程式內建路徑；建議在 `run_all_quantization.sh` 的設定區加入自己的輸出位置，例如：
-
-```sh
-export OUT_DIR="/path/to/quantized-weights"
-```
 
 完整的主要輸出如下：
 
