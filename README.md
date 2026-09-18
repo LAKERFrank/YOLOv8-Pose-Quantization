@@ -10,11 +10,15 @@ YOLOv8-Pose-Quantization/
 ├── dataset/
 │   ├── dataset_generator.py      # 從影片產生 YOLO Pose 標記資料
 │   ├── raw-data/                 # 原始影片，可放在多層子目錄
-│   └── labeled-dataset/          # 自動產生的標記資料
-│       ├── images/              # 640 × 640 灰階 PNG
-│       ├── labels/              # YOLO Pose 格式 TXT
-│       ├── preview/             # 抽樣影像、標記與骨架預覽
-│       └── data.yaml            # 訓練資料設定
+│   ├── labeled-dataset/          # 自動產生、尚待整理的標記資料
+│   │   ├── images/              # 640 × 640 灰階 PNG
+│   │   ├── labels/              # YOLO Pose 格式 TXT
+│   │   ├── preview/             # 抽樣影像、標記與骨架預覽
+│   │   └── data.yaml            # 資料集設定
+│   ├── train-dataset/            # 初始訓練資料集
+│   ├── finetune-dataset/         # 微調資料集
+│   ├── calibration-dataset/      # INT8 calibration 資料集
+│   └── valid-dataset/            # 最終驗證資料集
 ├── model/
 │   ├── train.py                 # 訓練單通道灰階 Pose 模型
 │   └── finetune.py              # 使用既有權重繼續微調
@@ -132,9 +136,28 @@ ROI 座標需依實際影片調整。也可用 `--roi_cr0` 至 `--roi_cr3` 分�
 
 產生的 `data.yaml` 包含 `channels: 1`，並記錄資料集的絕對路徑；搬移資料集後需更新 `path`。目前 `train` 與 `val` 都使用 `images/`，尚未切分獨立驗證集，因此驗證數值不能代表對未見資料的泛化能力。
 
+### Dataset分工
+
+`dataset_generator.py` 產生的 `labeled-dataset/` 是自動標記後的初始資料。確認 `preview/` 與標記品質後，通常會依用途整理成四類資料集：
+
+| 資料集 | 用途 | 是否需要標記 | 對應程式或參數 |
+| --- | --- | --- | --- |
+| Train dataset | 從預訓練權重開始進行主要訓練，讓模型學習基本資料分布。 | 需要 bounding box 與 keypoint 標記 | `model/train.py --data` |
+| Fine-tune dataset | 使用已訓練的權重繼續微調，通常放目標場景、新拍攝角度或需要加強的資料。 | 需要 bounding box 與 keypoint 標記 | `model/finetune.py --data` |
+| Calibration dataset | 建立 TensorRT INT8 engine 時估計 activation range。內容應能代表實際部署時的影像分布。 | 量化程式只讀取影像，不使用標記 | `run_all_quantization.sh` 的 `DATA_YAML` 與 `CALIB_FRAC` |
+| Valid dataset | 最後評估 box／pose mAP 與實際 inference 表現，作為不同模型與量化結果的比較基準。 | 必須有正確且人工確認過的 ground truth | `measurement/val_engine.py --datasets` |
+
+對本專案的固定鏡頭、灰階人體姿態模型，calibration dataset 建議先準備 **500～1,000 張**具代表性的影像：
+
+- 200～500 張：適合快速測試量化流程。
+- 500～1,000 張：建議的起始範圍。
+- 1,000～3,000 張：場景、光線或攝影機差異較大時使用。
+
+請從不同影片、session、攝影機、光線、人物距離與姿勢中取樣，避免使用大量幾乎相同的連續影格。增加數量不一定會持續改善量化結果，建議分別使用 500、1,000、2,000 張建立 INT8 engine，再以同一份 valid dataset 比較 `pose_map`；當增加資料後結果不再明顯改善，即可採用較小的 calibration dataset。Batch 10 calibration 只會處理完整 batch，因此圖片數量最好是 10 的倍數，最後不足 10 張的部分不會被使用。
+
 ## 2. Training
 
-`model/train.py` 讀取 `labeled-dataset/data.yaml`，預設從 `yolov8n-pose.pt` 預訓練權重開始訓練。程式將第一層卷積改為單通道，並停用 HSV 色彩增強。
+`model/train.py` 讀取 train dataset 的 `data.yaml`，預設從 `yolov8n-pose.pt` 預訓練權重開始訓練。程式將第一層卷積改為單通道，並停用 HSV 色彩增強。
 
 以下保留完整的 training 指令設定，使用 Linux / Bash 的單一反斜線換行。
 
@@ -172,7 +195,7 @@ trains/train/weights/last.pt
 
 ## 3. Fine-tuning
 
-`model/finetune.py` 使用既有模型權重與 `labeled-dataset/data.yaml` 繼續微調，支援單通道模型，並使用較保守的姿態資料增強設定。
+`model/finetune.py` 使用既有模型權重與 fine-tune dataset 的 `data.yaml` 繼續微調，支援單通道模型，並使用較保守的姿態資料增強設定。
 
 ```sh
 nohup python3 model/finetune.py \
@@ -229,7 +252,7 @@ export CALIB_FRAC=1
 | --- | --- |
 | `MODEL_PT` | 要進行量化的 YOLO Pose `.pt` 權重。模型需為本專案使用的單通道灰階模型。 |
 | `DATA_YAML` | INT8 calibration 使用的資料集設定檔。程式會讀取 YAML 中的 `train` 路徑並搜尋圖片。 |
-| `CALIB_FRAC` | 從 training dataset 隨機抽取多少比例進行 calibration。`1` 代表全部、`0.5` 代表 50%、`0.1` 代表 10%。batch 10 至少會取 10 張圖片。 |
+| `CALIB_FRAC` | 從 calibration dataset 隨機抽取多少比例進行 calibration。`1` 代表全部、`0.5` 代表 50%、`0.1` 代表 10%。batch 10 至少會取 10 張圖片。 |
 
 其他設定：
 
